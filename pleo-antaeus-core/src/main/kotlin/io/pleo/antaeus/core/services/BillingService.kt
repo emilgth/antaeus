@@ -1,5 +1,6 @@
 package io.pleo.antaeus.core.services
 
+import io.pleo.antaeus.core.exceptions.BillingNotScheduledException
 import io.pleo.antaeus.core.exceptions.CurrencyMismatchException
 import io.pleo.antaeus.core.exceptions.CustomerNotFoundException
 import io.pleo.antaeus.core.exceptions.NetworkException
@@ -15,123 +16,161 @@ import java.util.*
 
 private val logger = KotlinLogging.logger { }
 
+/**
+ * Class to handle scheduling of billing of pending invoices in the database
+ * @property paymentProvider
+ * @property dal
+ */
 class BillingService(
     private val paymentProvider: PaymentProvider,
     private val dal: AntaeusDal
 ) {
+    /**
+     * Shows if a billing is scheduled or not
+     */
+    private var billingScheduled = false
 
-    /*
-        Schedules billing function to be called on the first of the next month
+    /**
+     * TimerTask to be scheduled. When run it will fetch pending invoices, attempt to process them and sets billingScheduled to false
+     */
+    private lateinit var timerTask: TimerTask
 
-        Returns:
-            A Date object, containing the scheduled execution time
-    */
+    /**
+     * Schedules processPendingInvoices function to be called on the first of the next month
+     * @see processPendingInvoices
+     * @param date If this parameter is passed, this date will be used instead of the current date
+     * @return A Date object of the scheduled execution time
+     */
     fun scheduleBilling(date: LocalDate = LocalDate.now()): Date {
-        val scheduleDate: Date = getFirstOfNextMonth(date)
-        // Timer to handle scheduling
+        val scheduleDate = getFirstOfNextMonth(date)
         val timer = Timer()
-
-        // TimerTask to be scheduled by timer
-        val timerTask = object : TimerTask() {
+        timerTask = object : TimerTask() {
             override fun run() {
-                billPendingInvoices()
+                val pendingInvoices = dal.fetchPendingInvoices()
+                processPendingInvoices(pendingInvoices)
+                billingScheduled = false
             }
         }
-        // Schedule the TimerTask to be run at scheduleDate
         timer.schedule(
             timerTask,
             scheduleDate
         )
-        logger.info { "Billing scheduled for ${Date.from(Instant.ofEpochMilli(timerTask.scheduledExecutionTime()))}." }
-        return Date.from(Instant.ofEpochMilli(timerTask.scheduledExecutionTime()))
+        billingScheduled = true
+        logger.info { "Billing scheduled for $scheduleDate." }
+        return scheduleDate
     }
 
-    /*
-        Gets the first day of the next month
-
-        Returns:
-            A Date object of the first day of the next month
-    */
+    /**
+     * Gets the first day of the next month.
+     * If the month is December, rolls over to next year and sets month to January
+     * @param currentDate The date that the result will be calculated from
+     * @return A Date object of the first day of the next month
+     */
     private fun getFirstOfNextMonth(currentDate: LocalDate): Date {
-        // The date where the billing is to be scheduled
         return Date.from(
             LocalDate.of(
-                // If the current month is December, add 1 to current year
                 if (currentDate.month.value == 12) {
                     currentDate.year + 1
                 } else {
                     currentDate.year
                 },
-                // Adds 1 to current month, the "plus" method handles rollover from 12 to 1
                 currentDate.month.plus(1),
                 1
             )
-                // Convert to LocalDateTime
                 .atStartOfDay()
-                // Convert to Instant
                 .toInstant(ZoneOffset.UTC)
         )
     }
 
-    /*
-        Attempts to bill all pending invoices from DB
-        Calls method to schedule next billing time
-
-        Returns:
-            List of processed invoices
-    */
-    fun billPendingInvoices(): List<Invoice> {
-        // Get all pending invoices
-        val pendingInvoices = dal.fetchPendingInvoices()
-        // List to store processed invoices
+    /**
+     * Attempts to process list of invoices
+     * @param invoices The list of invoices to process
+     * @return List of processed invoices
+     */
+    fun processPendingInvoices(invoices: List<Invoice>): List<Invoice> {
         val processedInvoices = mutableListOf<Invoice>()
-        // Loop through all pending invoices
-        pendingInvoices.forEach { invoice ->
+        invoices.forEach { invoice ->
             val processedInvoice = billInvoice(invoice)
             processedInvoices.add(processedInvoice)
         }
         logger.info { "${processedInvoices.size} invoices were processed" }
-        // Schedule next billing date
-        scheduleBilling()
         return processedInvoices.toList()
     }
 
-    /*
-        Charges an invoice
-
-        Returns:
-            Invoice object with status set to paid
-    */
-    private fun billInvoice(
-        invoice: Invoice
-    ): Invoice {
-        // Attempt to charge the customer
+    /**
+     * Attempts to charge an invoice.
+     * If charge is a success, invoice status will be set to PAID.
+     * If charge fails, invoice status will be set to INSUFFICIENT_BALANCE.
+     * If any exception is thrown, the invoice status will be set to exception cause.
+     * @param invoice invoice to attempt to charge
+     * @return invoice with status set to result of attempt to charge
+     */
+    private fun billInvoice(invoice: Invoice): Invoice {
         var result: Invoice
         try {
             val success = paymentProvider.charge(invoice)
-            if (!success) {
+            result = if (!success) {
                 logger.error { "Customer ${invoice.customerId} account balance did not allow the charge, when attempting to charge Invoice ${invoice.id}" }
-                result = invoice.copy(status = InvoiceStatus.INSUFFICIENT_BALANCE)
-                dal.updateInvoice(result)
+                updateInvoiceStatus(invoice, InvoiceStatus.INSUFFICIENT_BALANCE)
+            } else {
+                updateInvoiceStatus(invoice, InvoiceStatus.PAID)
             }
-            // Create copy of invoice with status set to paid
-            result = invoice.copy(status = InvoiceStatus.PAID)
-            // Update the invoice in the DB
-            dal.updateInvoice(result)
         } catch (e: CustomerNotFoundException) {
-            logger.error { "${e.message} when attempting to charge Invoice ${invoice.id}" }
-            result = invoice.copy(status = InvoiceStatus.CUSTOMER_NOT_FOUND)
-            dal.updateInvoice(result)
+            logError(e, invoice.id)
+            result = updateInvoiceStatus(invoice, InvoiceStatus.CUSTOMER_NOT_FOUND)
         } catch (e: CurrencyMismatchException) {
-            logger.error { "${e.message} when attempting to charge Invoice ${invoice.id}" }
-            result = invoice.copy(status = InvoiceStatus.CURRENCY_MISMATCH)
-            dal.updateInvoice(result)
+            logError(e, invoice.id)
+            result = updateInvoiceStatus(invoice, InvoiceStatus.CURRENCY_MISMATCH)
         } catch (e: NetworkException) {
-            logger.error { "${e.message} when attempting to charge Invoice ${invoice.id}" }
-            result = invoice.copy(status = InvoiceStatus.NETWORK_EXCEPTION)
-            dal.updateInvoice(result)
+            logError(e, invoice.id)
+            result = updateInvoiceStatus(invoice, InvoiceStatus.NETWORK_EXCEPTION)
         }
         return result
     }
 
+    /**
+     * Updates invoice status to given parameter, and persists to DB
+     * @param invoice the invoice to update
+     * @param status the status to update the invoice with
+     * @return The updated invoice
+     */
+    private fun updateInvoiceStatus(invoice: Invoice, status: InvoiceStatus): Invoice {
+        val result = invoice.copy(status = status)
+        dal.updateInvoice(result)
+        return result
+    }
+
+    /**
+     * Returns the next billing date, throws BillingNotScheduledException if no billing is scheduled
+     * @return next scheduled billing date
+     * @throws BillingNotScheduledException
+     */
+    fun getNextBillingDate(): Date {
+        if (!billingScheduled) {
+            throw BillingNotScheduledException()
+        }
+        return Date.from(Instant.ofEpochMilli(timerTask.scheduledExecutionTime()))
+    }
+
+    /**
+     * Cancels any scheduled billing tasks
+     * @return true if the the task is successfully canceled, false if the task has already run or non was scheduled
+     */
+    fun cancel(): Boolean {
+        if (!billingScheduled) {
+            return false
+        }
+        val result = timerTask.cancel()
+        billingScheduled = false
+        return result
+    }
+
+    /**
+     * Utility function for logging billing exceptions
+     * @param e the thrown exception
+     * @param invoiceId id of the invoice that caused the error
+     */
+    private fun logError(e: Exception, invoiceId: Int) {
+        logger.error(e) { "${e.message} when attempting to charge Invoice $invoiceId" }
+    }
 }
