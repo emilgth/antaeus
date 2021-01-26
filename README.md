@@ -1,88 +1,33 @@
-## Antaeus
+## Introduction
 
-Antaeus (/ænˈtiːəs/), in Greek mythology, a giant of Libya, the son of the sea god Poseidon and the Earth goddess Gaia. He compelled all strangers who were passing through the country to wrestle with him. Whenever Antaeus touched the Earth (his mother), his strength was renewed, so that even if thrown to the ground, he was invincible. Heracles, in combat with him, discovered the source of his strength and, lifting him up from Earth, crushed him to death.
+Implementing the actual functionality took me about a days work (8 hours). Messing around with refactoring and testing
+took me a lot longer. I worked on it on and off for a week in total. I also spent a few days before I began learning
+Kotlin, Docker and Gradle.
 
-Welcome to our challenge.
+From the challenge description, I interpreted the actual scheduling as the main task, and the billing as secondary, so I
+spent most of my time making that function correctly.
 
-## The challenge
+Right now the program can schedule billing for the first of the next month, and it can process the invoices when the
+date is reached. A scheduled billing can be canceled, resumed, and the scheduled time can be checked via REST endpoints.
 
-As most "Software as a Service" (SaaS) companies, Pleo needs to charge a subscription fee every month. Our database contains a few invoices for the different markets in which we operate. Your task is to build the logic that will schedule payment of those invoices on the first of the month. While this may seem simple, there is space for some decisions to be taken and you will be expected to justify them.
+## Schedule
 
-## Instructions
+For the scheduling I decided to use the Timer and TimerTask classes since they made it very simple to do in-app as
+opposed to using cron-jobs. They also made it easy to monitor the current status of the schedule, and they made it easy
+to test, since it was all handled programmatically.
 
-Fork this repo with your solution. Ideally, we'd like to see your progression through commits, and don't forget to update the README.md to explain your thought process.
+Using cron-jobs would have been an easy and simple solution, but I would also have lost som control.
 
-Please let us know how long the challenge takes you. We're not looking for how speedy or lengthy you are. It's just really to give us a clearer idea of what you've produced in the time you decided to take. Feel free to go as big or as small as you want.
+## Charging
 
-## Developing
+The actual charging of the invoices is a simple loop, that attempts to charge all the pending invoices in the DB. The
+invoices are then updated with the result of the charge, if an exception occurs the invoice status will be set to that
+exception. Then it will be easy to find and handle them all later.
 
-Requirements:
-- \>= Java 11 environment
+I would like to have used concurrency when doing the charging as it's possibly an action that could take a while. I
+couldn't really make it work in a way, where I was sure I was done correctly, so it didn't get implemented.
 
-Open the project using your favorite text editor. If you are using IntelliJ, you can open the `build.gradle.kts` file and it is gonna setup the project in the IDE for you.
+## Testing
 
-### Building
-
-```
-./gradlew build
-```
-
-### Running
-
-There are 2 options for running Anteus. You either need libsqlite3 or docker. Docker is easier but requires some docker knowledge. We do recommend docker though.
-
-*Running Natively*
-
-Native java with sqlite (requires libsqlite3):
-
-If you use homebrew on MacOS `brew install sqlite`.
-
-```
-./gradlew run
-```
-
-*Running through docker*
-
-Install docker for your platform
-
-```
-docker build -t antaeus
-docker run antaeus
-```
-
-### App Structure
-The code given is structured as follows. Feel free however to modify the structure to fit your needs.
-```
-├── buildSrc
-|  | gradle build scripts and project wide dependency declarations
-|  └ src/main/kotlin/utils.kt 
-|      Dependencies
-|
-├── pleo-antaeus-app
-|       main() & initialization
-|
-├── pleo-antaeus-core
-|       This is probably where you will introduce most of your new code.
-|       Pay attention to the PaymentProvider and BillingService class.
-|
-├── pleo-antaeus-data
-|       Module interfacing with the database. Contains the database 
-|       models, mappings and access layer.
-|
-├── pleo-antaeus-models
-|       Definition of the Internal and API models used throughout the
-|       application.
-|
-└── pleo-antaeus-rest
-        Entry point for HTTP REST API. This is where the routes are defined.
-```
-
-### Main Libraries and dependencies
-* [Exposed](https://github.com/JetBrains/Exposed) - DSL for type-safe SQL
-* [Javalin](https://javalin.io/) - Simple web framework (for REST)
-* [kotlin-logging](https://github.com/MicroUtils/kotlin-logging) - Simple logging framework for Kotlin
-* [JUnit 5](https://junit.org/junit5/) - Testing framework
-* [Mockk](https://mockk.io/) - Mocking library
-* [Sqlite3](https://sqlite.org/index.html) - Database storage engine
-
-Happy hacking 😁!
+I don't really have a lot of experience in testing (there was no testing on the backend at my internship...), so I have
+probably missed some test cases. I feel I have tried to test the most common use-cases though.
